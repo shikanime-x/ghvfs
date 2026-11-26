@@ -37,6 +37,37 @@ pub async fn open(root: &Path) -> Result<SqlitePool, String> {
     Ok(pool)
 }
 
+const INSERT: &str = "INSERT INTO records (repo, kind, number, title, body, updated_at, readonly)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (repo, kind, number) DO UPDATE SET
+         title = excluded.title,
+         body = excluded.body,
+         updated_at = excluded.updated_at,
+         readonly = excluded.readonly";
+
+async fn write_rows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    repo: &str,
+    records: &[Snapshot],
+) -> Result<(), String> {
+    for chunk in records.chunks(BATCH) {
+        for s in chunk {
+            sqlx::query(INSERT)
+                .bind(repo)
+                .bind(s.kind.as_str())
+                .bind(s.number as i64)
+                .bind(&s.title)
+                .bind(&s.body)
+                .bind(&s.updated_at)
+                .bind(serde_json::to_string(&s.readonly).map_err(|e| e.to_string())?)
+                .execute(&mut **tx)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 pub async fn replace(pool: &SqlitePool, repo: &str, records: &[Snapshot]) -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     sqlx::query("DELETE FROM records WHERE repo = ?")
@@ -44,25 +75,23 @@ pub async fn replace(pool: &SqlitePool, repo: &str, records: &[Snapshot]) -> Res
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-    for chunk in records.chunks(BATCH) {
-        for s in chunk {
-            sqlx::query(
-                "INSERT INTO records (repo, kind, number, title, body, updated_at, readonly)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(repo)
-            .bind(s.kind.as_str())
-            .bind(s.number as i64)
-            .bind(&s.title)
-            .bind(&s.body)
-            .bind(&s.updated_at)
-            .bind(serde_json::to_string(&s.readonly).map_err(|e| e.to_string())?)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-        }
-    }
+    write_rows(&mut tx, repo, records).await?;
     tx.commit().await.map_err(|e| e.to_string())
+}
+
+pub async fn upsert(pool: &SqlitePool, repo: &str, records: &[Snapshot]) -> Result<(), String> {
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    write_rows(&mut tx, repo, records).await?;
+    tx.commit().await.map_err(|e| e.to_string())
+}
+
+pub async fn remove_repo(pool: &SqlitePool, repo: &str) -> Result<(), String> {
+    sqlx::query("DELETE FROM records WHERE repo = ?")
+        .bind(repo)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 pub async fn update_title(

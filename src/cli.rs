@@ -30,6 +30,20 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
+    /// Pull changed issues and PRs from GitHub into the tree once
+    Pull {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        root: PathBuf,
+    },
+    /// Remove a synced repository from the tree and the snapshot database
+    Unsync {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        root: PathBuf,
+    },
     /// Apply edits automatically after a document is saved
     Watch {
         #[arg(long)]
@@ -38,5 +52,11 @@ pub enum Commands {
         commit: bool,
         #[arg(long)]
         force: bool,
+        #[arg(long)]
+        pull: bool,
+        #[arg(long)]
+        repo: Vec<String>,
+        #[arg(long, default_value_t = 30)]
+        interval: u64,
     },
 }

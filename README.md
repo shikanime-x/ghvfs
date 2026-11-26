@@ -30,6 +30,10 @@ cargo run -- watch --root /tmp/ghvfs --commit
 
 All three kind folders exist after a sync even when empty. Front matter is serialized from a derived serde struct through `serde_yaml`; `Kind` and `Snapshot` are derived types, and `ToSnapshot` converts a record to its stored snapshot. `apply` compares typed front-matter values against the snapshot, so quoting changes alone are not edits. SQL rows are read through a derived `sqlx::FromRow` struct. `apply` writes title and body for issues and PRs; discussions are read-only because the edit path is not implemented.
 
+`pull --repo <org/name> --root <dir>` fetches issues and PRs updated since the newest snapshot timestamp, rewrites changed documents and upserts their snapshots. Documents with unsent local edits are skipped. `unsync --repo <org/name> --root <dir>` removes a repo's documents and rows.
+
+`watch --pull --repo <org/name> [--repo <org/name> ...] --root <dir> [--interval 30]` polls those repos. A repo with changes is polled more often, an idle repo less often, bounded by 5 s and eight times the base interval. Every 60 s the loop reads `/rate_limit`; low remaining budget multiplies the interval by 2, 4 or 16, and zero backs off by 16.
+
 `watch` observes the tree with `notify` and runs `apply` after document saves, using a 500 ms debounce. It is a dry run unless `--commit` is present. Backends are selected per target: kqueue on macOS, inotify on Linux and Android, ReadDirectoryChangesW on Windows. On macOS outside the devenv shell, set `LIBRARY_PATH="$(xcrun --show-sdk-path)/usr/lib"` for the kqueue backend to link.
 
 ## Check

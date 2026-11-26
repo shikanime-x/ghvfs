@@ -10,7 +10,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "derive"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "time"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 notify = { version = "8", default-features = false, features = ["macos_kqueue"] }

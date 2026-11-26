@@ -35,6 +35,9 @@ if jq == ".[]":
         "updated_at": "2026-11-26T00:00:00Z", "html_url": "https://example.test/9",
         "body": "PR body"}))
     sys.exit(0)
+if jq == ".resources.core":
+    print(json.dumps({"remaining": 5000, "limit": 5000, "reset": 0}))
+    sys.exit(0)
 if jq == ".updated_at":
     print("2026-11-26T00:00:00Z")
 "###;
@@ -63,9 +66,13 @@ fn fixture(name: &str) -> Fixture {
 }
 
 fn run(f: &Fixture, args: &[&str]) -> (bool, String) {
+    run_with(f, &f.stub, args)
+}
+
+fn run_with(f: &Fixture, stub: &PathBuf, args: &[&str]) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_ghvfs"))
         .args(args)
-        .env("GHVFS_GH", &f.stub)
+        .env("GHVFS_GH", stub)
         .env("GHVFS_PATCH_LOG", &f.patches)
         .current_dir(&f.root)
         .output()
@@ -156,4 +163,41 @@ fn watch_applies_a_saved_document() {
         patches.contains("Watched edit"),
         "no watch patch: {patches}"
     );
+}
+
+#[test]
+fn pull_updates_changed_remote_documents() {
+    let f = fixture("pull");
+    sync(&f);
+    let remote = f.root.join("fake-gh-remote");
+    let changed = STUB
+        .replace("Stub issue", "Remote edit")
+        .replace("2026-11-26T00:00:00Z", "2026-11-26T00:01:00Z");
+    fs::write(&remote, changed).unwrap();
+    fs::set_permissions(&remote, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let root = f.tree.to_str().unwrap();
+    let (ok, out) = run_with(
+        &f,
+        &remote,
+        &["pull", "--repo", "acme/demo", "--root", root],
+    );
+    assert!(ok && out.contains("pull: 2 changed"), "{out}");
+    let issue = fs::read_to_string(f.tree.join("acme/demo.issues/1/issue.md")).unwrap();
+    assert!(issue.contains("title: Remote edit"), "{issue}");
+    let (ok, out) = run(&f, &["apply", "--root", root]);
+    assert!(ok && out.contains("apply: 0 changed"), "{out}");
+}
+
+#[test]
+fn unsync_removes_repo_tree() {
+    let f = fixture("unsync");
+    sync(&f);
+    let root = f.tree.to_str().unwrap();
+    let (ok, out) = run(&f, &["unsync", "--repo", "acme/demo", "--root", root]);
+    assert!(ok && out.contains("unsynced acme/demo"), "{out}");
+    assert!(!f.tree.join("acme/demo.issues").exists());
+    assert!(!f.tree.join("acme/demo.pr").exists());
+    let (ok, out) = run(&f, &["apply", "--root", root]);
+    assert!(ok && out.contains("apply: 0 changed"), "{out}");
 }
