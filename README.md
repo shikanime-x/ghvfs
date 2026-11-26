@@ -37,3 +37,5 @@ All three kind folders exist after a sync even when empty. Each document carries
 ```sh
 cargo test
 ```
+
+The integration tests use `GHVFS_GH` to point the binary at a stub `gh`, so they need no network or credentials. On Windows the stub-based tests are skipped; verify that target with `cargo check --target x86_64-pc-windows-gnu`.

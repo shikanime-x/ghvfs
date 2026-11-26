@@ -22,7 +22,8 @@ const READONLY_KEYS: [&str; 11] = [
 ];
 
 fn gh(args: &[&str]) -> Result<String, String> {
-    let out = Command::new("gh")
+    let program = env::var("GHVFS_GH").unwrap_or_else(|_| "gh".to_string());
+    let out = Command::new(program)
         .args(args)
         .output()
         .map_err(|e| format!("spawn gh: {e}"))?;
