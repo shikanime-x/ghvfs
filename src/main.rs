@@ -5,7 +5,9 @@ use std::{
     process::Command,
 };
 
-const READONLY_KEYS: [&str; 8] = [
+const READONLY_KEYS: [&str; 11] = [
+    "number",
+    "kind",
     "state",
     "type",
     "labels",
@@ -13,6 +15,7 @@ const READONLY_KEYS: [&str; 8] = [
     "milestone",
     "author",
     "created_at",
+    "updated_at",
     "url",
 ];
 
@@ -29,6 +32,14 @@ fn gh(args: &[&str]) -> Result<String, String> {
 
 fn field(v: &Value, key: &str) -> String {
     v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+fn nested(v: &Value, a: &str, b: &str) -> String {
+    v.get(a)
+        .and_then(|x| x.get(b))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 fn names(v: &Value, key: &str, sub: &str) -> Vec<String> {
@@ -48,11 +59,12 @@ fn names(v: &Value, key: &str, sub: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-struct Issue {
+struct Record {
     number: u64,
+    kind: &'static str,
     title: String,
     state: String,
-    kind: String,
+    type_name: String,
     labels: Vec<String>,
     assignees: Vec<String>,
     milestone: String,
@@ -63,31 +75,17 @@ struct Issue {
     body: String,
 }
 
-fn parse_issue(v: &Value) -> Issue {
-    Issue {
+fn parse_issue(v: &Value) -> Record {
+    Record {
         number: v.get("number").and_then(Value::as_u64).unwrap_or(0),
+        kind: "issues",
         title: field(v, "title"),
         state: field(v, "state"),
-        kind: v
-            .get("type")
-            .and_then(|t| t.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        type_name: nested(v, "type", "name"),
         labels: names(v, "labels", "name"),
         assignees: names(v, "assignees", "login"),
-        milestone: v
-            .get("milestone")
-            .and_then(|m| m.get("title"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
-        author: v
-            .get("user")
-            .and_then(|u| u.get("login"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string(),
+        milestone: nested(v, "milestone", "title"),
+        author: nested(v, "user", "login"),
         created_at: field(v, "created_at"),
         updated_at: field(v, "updated_at"),
         url: field(v, "html_url"),
@@ -95,32 +93,43 @@ fn parse_issue(v: &Value) -> Issue {
     }
 }
 
-fn slug(title: &str) -> String {
-    let folded: String = title
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let mut out = String::new();
-    for c in folded.chars() {
-        if c == '-' && out.ends_with('-') {
-            continue;
-        }
-        out.push(c);
+fn parse_pr(v: &Value) -> Record {
+    Record {
+        number: v.get("number").and_then(Value::as_u64).unwrap_or(0),
+        kind: "pr",
+        title: field(v, "title"),
+        state: field(v, "state"),
+        type_name: if v.get("draft").and_then(Value::as_bool).unwrap_or(false) {
+            "draft".into()
+        } else {
+            "ready".into()
+        },
+        labels: names(v, "labels", "name"),
+        assignees: names(v, "assignee", "login"),
+        milestone: nested(v, "milestone", "title"),
+        author: nested(v, "user", "login"),
+        created_at: field(v, "created_at"),
+        updated_at: field(v, "updated_at"),
+        url: field(v, "html_url"),
+        body: field(v, "body"),
     }
-    let out = out.trim_matches('-').to_string();
-    // ponytail: ASCII-only fold keeps truncate on a char boundary; Unicode titles lose non-ASCII chars.
-    let out = out.chars().take(60).collect::<String>();
-    let out = out.trim_end_matches('-').to_string();
-    if out.is_empty() {
-        "issue".to_string()
-    } else {
-        out
+}
+
+fn parse_discussion(v: &Value) -> Record {
+    Record {
+        number: v.get("number").and_then(Value::as_u64).unwrap_or(0),
+        kind: "discussion",
+        title: field(v, "title"),
+        state: String::new(),
+        type_name: String::new(),
+        labels: Vec::new(),
+        assignees: Vec::new(),
+        milestone: String::new(),
+        author: nested(v, "author", "login"),
+        created_at: field(v, "createdAt"),
+        updated_at: field(v, "updatedAt"),
+        url: field(v, "url"),
+        body: field(v, "body"),
     }
 }
 
@@ -146,21 +155,23 @@ fn yq_list(values: &[String]) -> String {
     )
 }
 
-fn front_matter(i: &Issue) -> String {
+fn front_matter(r: &Record) -> String {
+    // ponytail: flat scalars and lists only; add a YAML crate for nested fields.
     format!(
-        "---\nnumber: {}\ntitle: {}\nstate: {}\ntype: {}\nlabels: {}\nassignees: {}\nmilestone: {}\nauthor: {}\ncreated_at: {}\nupdated_at: {}\nurl: {}\n---\n{}\n",
-        i.number,
-        yq(&i.title),
-        yq(&i.state),
-        yq(&i.kind),
-        yq_list(&i.labels),
-        yq_list(&i.assignees),
-        yq(&i.milestone),
-        yq(&i.author),
-        yq(&i.created_at),
-        yq(&i.updated_at),
-        yq(&i.url),
-        i.body
+        "---\nnumber: {}\nkind: {}\ntitle: {}\nstate: {}\ntype: {}\nlabels: {}\nassignees: {}\nmilestone: {}\nauthor: {}\ncreated_at: {}\nupdated_at: {}\nurl: {}\n---\n{}\n",
+        r.number,
+        yq(r.kind),
+        yq(&r.title),
+        yq(&r.state),
+        yq(&r.type_name),
+        yq_list(&r.labels),
+        yq_list(&r.assignees),
+        yq(&r.milestone),
+        yq(&r.author),
+        yq(&r.created_at),
+        yq(&r.updated_at),
+        yq(&r.url),
+        r.body
     )
 }
 
@@ -217,28 +228,33 @@ fn state_path(root: &Path) -> PathBuf {
     root.join(".ghvfs").join("state.json")
 }
 
-fn entry(i: &Issue) -> Value {
+fn entry(r: &Record) -> Value {
+    let ro = json!({
+        "number": json!(r.number.to_string()),
+        "kind": yq(r.kind),
+        "state": yq(&r.state),
+        "type": yq(&r.type_name),
+        "labels": yq_list(&r.labels),
+        "assignees": yq_list(&r.assignees),
+        "milestone": yq(&r.milestone),
+        "author": yq(&r.author),
+        "created_at": yq(&r.created_at),
+        "updated_at": yq(&r.updated_at),
+        "url": yq(&r.url)
+    });
     json!({
-        "number": i.number,
-        "title": i.title,
-        "body": i.body,
-        "updated_at": i.updated_at,
-        "readonly": {
-            "state": yq(&i.state),
-            "type": yq(&i.kind),
-            "labels": yq_list(&i.labels),
-            "assignees": yq_list(&i.assignees),
-            "milestone": yq(&i.milestone),
-            "author": yq(&i.author),
-            "created_at": yq(&i.created_at),
-            "url": yq(&i.url)
-        }
+        "number": r.number,
+        "kind": r.kind,
+        "title": r.title,
+        "body": r.body,
+        "updated_at": r.updated_at,
+        "readonly": ro
     })
 }
 
-fn write_state(root: &Path, repo: &str, issues: &[Value]) -> Result<(), String> {
+fn write_state(root: &Path, repo: &str, records: &[Value]) -> Result<(), String> {
     fs::create_dir_all(root.join(".ghvfs")).map_err(|e| e.to_string())?;
-    let payload = json!({ "repo": repo, "issues": issues });
+    let payload = json!({ "repo": repo, "records": records });
     fs::write(
         state_path(root),
         serde_json::to_string_pretty(&payload).map_err(|e| e.to_string())?,
@@ -249,16 +265,51 @@ fn write_state(root: &Path, repo: &str, issues: &[Value]) -> Result<(), String> 
 fn load_state(root: &Path) -> Result<(String, Vec<Value>), String> {
     let raw = fs::read_to_string(state_path(root)).map_err(|e| e.to_string())?;
     let v: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    let repo = field(&v, "repo");
-    let issues = v
-        .get("issues")
+    let records = v
+        .get("records")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    Ok((repo, issues))
+    Ok((field(&v, "repo"), records))
+}
+
+fn repo_parts(repo: &str) -> Result<(&str, &str), String> {
+    repo.split_once('/')
+        .ok_or_else(|| "repo must be <org>/<name>".into())
+}
+
+fn record_dir(root: &Path, repo: &str, kind: &str, number: u64) -> Result<PathBuf, String> {
+    let (org, name) = repo_parts(repo)?;
+    Ok(root
+        .join(org)
+        .join(format!("{name}.{kind}"))
+        .join(number.to_string()))
+}
+
+fn doc_name(kind: &str) -> &'static str {
+    match kind {
+        "pr" => "pr.md",
+        "discussion" => "discussion.md",
+        _ => "issue.md",
+    }
+}
+
+fn json_lines(raw: &str) -> Result<Vec<Value>, String> {
+    raw.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 fn sync(repo: &str, root: &Path) -> Result<(), String> {
+    let (org, name) = repo_parts(repo)?;
+    for kind in ["issues", "pr", "discussion"] {
+        fs::create_dir_all(root.join(org).join(format!("{name}.{kind}")))
+            .map_err(|e| e.to_string())?;
+    }
+    let mut records = Vec::new();
+
     let raw = gh(&[
         "api",
         &format!("repos/{repo}/issues?per_page=100"),
@@ -266,44 +317,47 @@ fn sync(repo: &str, root: &Path) -> Result<(), String> {
         "--jq",
         ".[] | select(.pull_request == null)",
     ])?;
-    let issues: Vec<Issue> = raw
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(serde_json::from_str::<Value>)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(parse_issue)
-        .collect();
+    records.extend(json_lines(&raw)?.iter().map(parse_issue));
 
-    fs::create_dir_all(root.join("issues")).map_err(|e| e.to_string())?;
-    let mut index = String::from("# Issues\n\n");
-    for issue in &issues {
-        let dir = root
-            .join("issues")
-            .join(format!("{:04}-{}", issue.number, slug(&issue.title)));
+    let raw = gh(&[
+        "api",
+        &format!("repos/{repo}/pulls?per_page=100"),
+        "--paginate",
+        "--jq",
+        ".[]",
+    ])?;
+    records.extend(json_lines(&raw)?.iter().map(parse_pr));
+
+    let query = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){discussions(first:100){nodes{number title body createdAt updatedAt url author{login}}}}}";
+    let raw = gh(&[
+        "api",
+        "graphql",
+        "-f",
+        &format!("query={query}"),
+        "-f",
+        &format!("owner={org}"),
+        "-f",
+        &format!("name={name}"),
+        "--jq",
+        ".data.repository.discussions.nodes[]?",
+    ])?;
+    records.extend(json_lines(&raw)?.iter().map(parse_discussion));
+
+    for record in &records {
+        let dir = record_dir(root, repo, record.kind, record.number)?;
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        fs::write(dir.join("issue.md"), front_matter(issue)).map_err(|e| e.to_string())?;
-        index.push_str(&format!("- #{} {}\n", issue.number, issue.title));
+        fs::write(dir.join(doc_name(record.kind)), front_matter(record))
+            .map_err(|e| e.to_string())?;
     }
-    fs::write(root.join("INDEX.md"), index).map_err(|e| e.to_string())?;
-    let entries: Vec<Value> = issues.iter().map(entry).collect();
+    let entries: Vec<Value> = records.iter().map(entry).collect();
     write_state(root, repo, &entries)?;
-    println!("synced {} issues", issues.len());
+    println!(
+        "synced {} issues, {} prs, {} discussions",
+        records.iter().filter(|r| r.kind == "issues").count(),
+        records.iter().filter(|r| r.kind == "pr").count(),
+        records.iter().filter(|r| r.kind == "discussion").count()
+    );
     Ok(())
-}
-
-fn issue_dir(root: &Path, number: u64) -> Result<PathBuf, String> {
-    let prefix = format!("{number:04}-");
-    let dirs = fs::read_dir(root.join("issues")).map_err(|e| e.to_string())?;
-    for d in dirs.flatten() {
-        if d.file_type().map(|t| t.is_dir()).unwrap_or(false)
-            && d.file_name().to_string_lossy().starts_with(&prefix)
-        {
-            return Ok(d.path());
-        }
-    }
-    Err(format!("no folder for issue #{number}"))
 }
 
 fn expected_readonly(e: &Value) -> Vec<String> {
@@ -323,9 +377,14 @@ fn apply(root: &Path, commit: bool, force: bool) -> Result<(), String> {
     let mut changed = 0;
     for e in entries.iter_mut() {
         let number = e.get("number").and_then(Value::as_u64).unwrap_or(0);
+        let kind = field(e, "kind");
+        // GraphQL discussions have no supported edit endpoint here.
+        if kind == "discussion" {
+            continue;
+        }
         let old_title = field(e, "title");
         let old_body = field(e, "body");
-        let doc = fs::read_to_string(issue_dir(root, number)?.join("issue.md"))
+        let doc = fs::read_to_string(record_dir(root, &repo, &kind, number)?.join(doc_name(&kind)))
             .map_err(|e| e.to_string())?;
         if readonly_lines(&doc) != expected_readonly(e) {
             return Err(format!(
@@ -396,7 +455,7 @@ fn run() -> Result<(), String> {
     match args.first().map(String::as_str) {
         Some("sync") => sync(
             &arg(&args, "--repo").ok_or("sync needs --repo <org/name>")?,
-            &Path::new(&arg(&args, "--root").ok_or("sync needs --root <dir>")?).to_path_buf(),
+            Path::new(&arg(&args, "--root").ok_or("sync needs --root <dir>")?),
         ),
         Some("apply") => apply(
             Path::new(&arg(&args, "--root").ok_or("apply needs --root <dir>")?),
@@ -418,12 +477,13 @@ fn main() {
 mod tests {
     use super::*;
 
-    fn sample() -> Issue {
-        Issue {
+    fn sample() -> Record {
+        Record {
             number: 7,
+            kind: "issues",
             title: "Fix login flow".into(),
             state: "open".into(),
-            kind: "Feature".into(),
+            type_name: "Feature".into(),
             labels: vec!["bug".into()],
             assignees: vec![],
             milestone: String::new(),
@@ -436,10 +496,10 @@ mod tests {
     }
 
     #[test]
-    fn slug_folds_and_truncates() {
-        assert_eq!(slug("Hello, World!"), "hello-world");
-        assert_eq!(slug("---"), "issue");
-        assert!(slug(&"a".repeat(100)).len() == 60);
+    fn hierarchy_paths_are_namespace_scoped() {
+        let p = record_dir(Path::new("/r"), "shikanime-x/ghvfs", "pr", 7).unwrap();
+        assert_eq!(p, Path::new("/r/shikanime-x/ghvfs.pr/7"));
+        assert_eq!(doc_name("discussion"), "discussion.md");
     }
 
     #[test]
@@ -447,6 +507,7 @@ mod tests {
         let doc = front_matter(&sample());
         for key in [
             "number:",
+            "kind:",
             "title:",
             "state:",
             "type:",
@@ -468,14 +529,13 @@ mod tests {
     #[test]
     fn change_detection_and_readonly_guard() {
         let mut doc = front_matter(&sample());
-        assert_eq!(parse_doc(&doc).unwrap().0, "Fix login flow");
+        let e = entry(&sample());
+        assert_eq!(readonly_lines(&doc), expected_readonly(&e));
         doc = doc.replacen(
             "title: \"Fix login flow\"",
             "title: \"Fixed login flow\"",
             1,
         );
-        let e = entry(&sample());
-        assert_eq!(readonly_lines(&doc), expected_readonly(&e));
         assert_eq!(parse_doc(&doc).unwrap().0, "Fixed login flow");
         let mutated = doc.replacen("state: \"open\"", "state: \"closed\"", 1);
         assert_ne!(readonly_lines(&mutated), expected_readonly(&e));
