@@ -1,8 +1,10 @@
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 use serde_json::{Value, json};
 use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
+    time::{Duration, Instant},
 };
 
 const READONLY_KEYS: [&str; 11] = [
@@ -443,6 +445,44 @@ fn apply(root: &Path, commit: bool, force: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn is_doc(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|n| n.to_str()),
+        Some("issue.md" | "pr.md" | "discussion.md")
+    )
+}
+
+fn watch(root: &Path, commit: bool, force: bool) -> Result<(), String> {
+    let (tx, rx) = std::sync::mpsc::channel::<Result<Event, notify::Error>>();
+    let mut watcher = notify::recommended_watcher(tx).map_err(|e| e.to_string())?;
+    watcher
+        .watch(root, RecursiveMode::Recursive)
+        .map_err(|e| e.to_string())?;
+    println!("watching {}", root.display());
+    // ponytail: fixed 500 ms debounce absorbs editor save bursts; raise it if a writer emits slower duplicate events.
+    let mut last = Instant::now() - Duration::from_millis(500);
+    loop {
+        match rx.recv_timeout(Duration::from_millis(250)) {
+            Ok(Ok(event))
+                if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
+                    && event.paths.iter().any(|p| is_doc(p)) =>
+            {
+                if last.elapsed() >= Duration::from_millis(500) {
+                    last = Instant::now();
+                    if let Err(e) = apply(root, commit, force) {
+                        eprintln!("ghvfs: apply failed: {e}");
+                    }
+                }
+            }
+            Ok(Err(e)) => eprintln!("ghvfs: watch event error: {e}"),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn arg(args: &[String], key: &str) -> Option<String> {
     args.iter()
         .position(|a| a == key)
@@ -462,7 +502,12 @@ fn run() -> Result<(), String> {
             args.iter().any(|a| a == "--commit"),
             args.iter().any(|a| a == "--force"),
         ),
-        _ => Err("usage: ghvfs sync --repo <org/name> --root <dir> | ghvfs apply --root <dir> [--commit] [--force]".into()),
+        Some("watch") => watch(
+            Path::new(&arg(&args, "--root").ok_or("watch needs --root <dir>")?),
+            args.iter().any(|a| a == "--commit"),
+            args.iter().any(|a| a == "--force"),
+        ),
+        _ => Err("usage: ghvfs sync --repo <org/name> --root <dir> | ghvfs apply --root <dir> [--commit] [--force] | ghvfs watch --root <dir> [--commit] [--force]".into()),
     }
 }
 
@@ -500,6 +545,13 @@ mod tests {
         let p = record_dir(Path::new("/r"), "shikanime-x/ghvfs", "pr", 7).unwrap();
         assert_eq!(p, Path::new("/r/shikanime-x/ghvfs.pr/7"));
         assert_eq!(doc_name("discussion"), "discussion.md");
+    }
+
+    #[test]
+    fn watch_filters_doc_edits() {
+        assert!(is_doc(Path::new("/r/org/repo.issues/1/issue.md")));
+        assert!(is_doc(Path::new("/r/org/repo.pr/6/pr.md")));
+        assert!(!is_doc(Path::new("/r/.ghvfs/state.json")));
     }
 
     #[test]
