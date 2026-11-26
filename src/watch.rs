@@ -125,7 +125,7 @@ pub async fn watch_pull(repos: &[String], root: &Path, base: u64) -> Result<(), 
             if now < state.next {
                 continue;
             }
-            match crate::ops::pull(repo, root, &pool, &state.since).await {
+            match crate::ops::pull(repo, root, &pool, &state.since, &[]).await {
                 Ok((next, changed)) => {
                     state.since = next;
                     state.interval = if changed > 0 {

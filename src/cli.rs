@@ -20,6 +20,9 @@ pub enum Commands {
         repo: String,
         #[arg(long)]
         root: PathBuf,
+        /// Project boards to read fields from, as <owner>/<number>
+        #[arg(long)]
+        project: Vec<String>,
     },
     /// Apply local title and body edits back to GitHub
     Apply {
@@ -36,6 +39,9 @@ pub enum Commands {
         repo: String,
         #[arg(long)]
         root: PathBuf,
+        /// Project boards to read fields from, as <owner>/<number>
+        #[arg(long)]
+        project: Vec<String>,
     },
     /// Remove a synced repository from the tree and the snapshot database
     Unsync {
