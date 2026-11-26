@@ -30,7 +30,7 @@ cargo run -- watch --root /tmp/ghvfs --commit
 
 All three kind folders exist after a sync even when empty. Each document carries YAML front matter with `number`, `kind`, `title`, `state`, `type`, `labels`, `assignees`, `milestone`, `author`, `created_at`, `updated_at` and `url`, followed by the body. `apply` writes title and body for issues and PRs; discussions are read-only because the edit path is not implemented. Editing other front matter fields is rejected.
 
-`watch` observes the tree with `notify` and runs `apply` after document saves, using a 500 ms debounce. It is a dry run unless `--commit` is present. On macOS outside the devenv shell, set `LIBRARY_PATH="$(xcrun --show-sdk-path)/usr/lib"` for the kqueue backend to link.
+`watch` observes the tree with `notify` and runs `apply` after document saves, using a 500 ms debounce. It is a dry run unless `--commit` is present. Backends are selected per target: kqueue on macOS, inotify on Linux and Android, ReadDirectoryChangesW on Windows. On macOS outside the devenv shell, set `LIBRARY_PATH="$(xcrun --show-sdk-path)/usr/lib"` for the kqueue backend to link.
 
 ## Check
 
