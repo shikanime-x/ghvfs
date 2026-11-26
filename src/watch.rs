@@ -59,17 +59,7 @@ struct RepoState {
 }
 
 async fn rate_budget() -> Result<(u64, u64), String> {
-    let raw = crate::gh::gh(&["api", "rate_limit", "--jq", ".resources.core"]).await?;
-    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-    let remaining = v
-        .get("remaining")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(5000);
-    let limit = v
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(5000);
-    Ok((remaining, limit))
+    crate::gh::rate_core().await
 }
 
 fn budget_factor(remaining: u64, limit: u64) -> u64 {
@@ -94,7 +84,7 @@ pub async fn watch_pull(repos: &[String], root: &Path, base: u64) -> Result<(), 
         .iter()
         .map(|s| s.updated_at.as_str())
         .max()
-        .unwrap_or("1970-01-01T00:00:00Z")
+        .unwrap_or("2000-01-01T00:00:00Z")
         .to_string();
     let mut states: HashMap<String, RepoState> = repos
         .iter()

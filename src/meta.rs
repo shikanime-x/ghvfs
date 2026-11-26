@@ -10,20 +10,7 @@ pub async fn fetch(repo: &str) -> Result<BTreeMap<u64, Value>, String> {
     let query = "query($org:String!,$name:String!){repository(owner:$org,name:$name){\
          issues(first:100){nodes{number linkedBranches(first:10){nodes{ref{associatedPullRequests(first:20){nodes{number}}}}}}}\
          pullRequests(first:100){nodes{number closingIssuesReferences(first:20){nodes{number}}}}}}";
-    let raw = gh::gh(&[
-        "api",
-        "graphql",
-        "-f",
-        &format!("query={query}"),
-        "-f",
-        &format!("org={org}"),
-        "-f",
-        &format!("name={name}"),
-        "--jq",
-        ".data",
-    ])
-    .await?;
-    let data: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let data = gh::graphql(query, serde_json::json!({"org": org, "name": name})).await?;
     let mut out: BTreeMap<u64, Value> = BTreeMap::new();
 
     let repo_obj = &data["repository"];
@@ -91,36 +78,29 @@ pub async fn attach_projects(
         return Ok(());
     }
     for (owner, number) in boards {
-        let raw = gh::gh(&[
-            "project",
-            "item-list",
-            &number,
-            "--owner",
-            &owner,
-            "--format",
-            "json",
-            "--limit",
-            "1000",
-        ])
-        .await?;
-        let data: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-        let items = data
-            .get("items")
-            .and_then(Value::as_array)
+        // Projects V2 item listing via GraphQL (user-owned boards are invisible to
+        // issue.projectItems; this scans the whole board and filters by repo).
+        let q = "query($owner:String!,$num:Int!){user(login:$owner){projectV2(number:$num){items(first:100){nodes{content{... on Issue{number repository{owner{login} name}} ... on PullRequest{number repository{owner{login} name}}} fieldValues(first:20){nodes{__typename ... on ProjectV2ItemFieldTextValue{text field{... on ProjectV2Field{name} ... on ProjectV2SingleSelectField{name} ... on ProjectV2IterationField{name}}} ... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2Field{name} ... on ProjectV2SingleSelectField{name} ... on ProjectV2IterationField{name}}} ... on ProjectV2ItemFieldDateValue{date field{... on ProjectV2Field{name} ... on ProjectV2SingleSelectField{name} ... on ProjectV2IterationField{name}}} ... on ProjectV2ItemFieldNumberValue{number field{... on ProjectV2Field{name} ... on ProjectV2SingleSelectField{name} ... on ProjectV2IterationField{name}}} ... on ProjectV2ItemFieldIterationValue{title field{... on ProjectV2Field{name} ... on ProjectV2SingleSelectField{name} ... on ProjectV2IterationField{name}}}}}}}}}}";
+        let data = gh::graphql(q, serde_json::json!({"owner": owner, "num": number.parse::<i64>().map_err(|e| e.to_string())?})).await?;
+        let items: Vec<Value> = data["user"]["projectV2"]["items"]["nodes"]
+            .as_array()
             .cloned()
             .unwrap_or_default();
         for item in items {
             let content = &item["content"];
-            // item-list puts the URL on item.repository and owner/name on content.repository.
+            // GraphQL content.repository is an object ({owner:{login}, name}); the old
+            // item-list scraper had item.repository as a full URL string. Accept both.
             let repo_url = item
                 .get("repository")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            let content_repo = content
-                .get("repository")
-                .and_then(Value::as_str)
+            let gql_owner = content["repository"]["owner"]["login"]
+                .as_str()
                 .unwrap_or_default();
-            let repo_ok = repo_url == format!("https://github.com/{repo}") || content_repo == repo;
+            let gql_name = content["repository"]["name"].as_str().unwrap_or_default();
+            let (want_org, want_name) = repo.split_once('/').unwrap_or((repo, repo));
+            let repo_ok = repo_url == format!("https://github.com/{repo}")
+                || (gql_owner == want_org && gql_name == want_name);
             if !repo_ok {
                 continue;
             }
@@ -128,18 +108,20 @@ pub async fn attach_projects(
                 continue;
             };
             let mut fields = BTreeMap::new();
-            for key in [
-                "status",
-                "priority",
-                "size",
-                "estimate",
-                "start date",
-                "target date",
-                "iteration",
-            ] {
-                if let Some(v) = item.get(key).and_then(Value::as_str) {
-                    let fk = key.split(' ').map(capitalize).collect::<Vec<_>>().join(" ");
-                    fields.insert(fk, json!(v));
+            for fv in item["fieldValues"]["nodes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+            {
+                let field_name = fv["field"]["name"].as_str().unwrap_or_default().to_string();
+                if field_name.is_empty() || field_name == "Title" {
+                    continue;
+                }
+                let val = ["text", "name", "date", "number", "title"]
+                    .iter()
+                    .find_map(|k| fv.get(k).cloned().filter(|v| !v.is_null()));
+                if let Some(v) = val {
+                    fields.insert(field_name, v);
                 }
             }
             if fields.is_empty() {
@@ -151,14 +133,6 @@ pub async fn attach_projects(
         }
     }
     Ok(())
-}
-
-fn capitalize(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-        None => String::new(),
-    }
 }
 
 /// Apply `meta` (from `fetch`/`attach_projects`) onto parsed records.
@@ -218,11 +192,5 @@ mod tests {
         assert_eq!(records[0].linked, vec![9]);
         assert_eq!(records[0].projects["acme/1"]["Status"], json!("Ready"));
         assert!(records[1].linked.is_empty() && records[1].projects.is_empty());
-    }
-
-    #[test]
-    fn capitalize_titles_field_keys() {
-        assert_eq!(capitalize("status"), "Status");
-        assert_eq!(capitalize("start date"), "Start date");
     }
 }

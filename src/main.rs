@@ -35,7 +35,7 @@ async fn run() -> Result<(), String> {
             project,
         } => {
             let pool = db::open(&root).await?;
-            ops::pull(&repo, &root, &pool, "1970-01-01T00:00:00Z", &project)
+            ops::pull(&repo, &root, &pool, "2000-01-01T00:00:00Z", &project)
                 .await
                 .map(|_| ())
         }

@@ -2,6 +2,10 @@
 
 Expose a GitHub repository's issues as a local tree of markdown files with metadata.
 
+## Auth
+
+Set `GH_TOKEN` (or `GITHUB_TOKEN`) to a GitHub token with repo access. The API client is octocrab; no `gh` CLI is required.
+
 ## Shell
 
 The flake consumes `shikanime-labs/devlib`. The `rust` profile supplies cargo, clippy and rustfmt. Run `direnv allow` or `nix develop`, then use `cargo`.
@@ -44,7 +48,7 @@ All three kind folders exist after a sync even when empty. Front matter is seria
 cargo test
 ```
 
-The integration tests use `GHVFS_GH` to point the binary at a stub `gh`, so they need no network or credentials. On Windows the stub-based tests are skipped; verify that target with a cross C toolchain:
+The integration tests spin up a stub HTTP API on localhost (`GHVFS_API`) backed by a Python stdlib script, so they need no network or credentials. On Windows the stub-based tests are skipped; verify that target with a cross C toolchain:
 
 ```sh
 nix-shell -p pkgsCross.musl64.buildPackages.gcc pkgsCross.mingwW64.buildPackages.gcc --run '
