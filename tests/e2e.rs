@@ -152,6 +152,7 @@ fn watch_applies_a_saved_document() {
         thread::sleep(Duration::from_millis(250));
     }
     child.kill().unwrap();
+    let _ = child.wait();
     assert!(
         patches.contains("Watched edit"),
         "no watch patch: {patches}"

@@ -15,13 +15,13 @@ cargo run -- apply --root /tmp/ghvfs --commit
 cargo run -- watch --root /tmp/ghvfs --commit
 ```
 
-`sync` is read-only on GitHub. It materializes issues, pull requests and discussions, and writes `.ghvfs/state.json` for the apply path. `apply` is a dry run unless `--commit` is present. `--force` overrides the stale-remote guard on `updated_at`.
+`sync` is read-only on GitHub. It materializes issues, pull requests and discussions, and writes `.ghvfs/state.sqlite3` through SQLx. Writes are committed in batches of 50 rows. An existing `state.json` is imported once and removed. `apply` is a dry run unless `--commit` is present. `--force` overrides the stale-remote guard on `updated_at`. The CLI uses clap and the runtime is Tokio.
 
 ## Layout
 
 ```text
 <root>/
-  .ghvfs/state.json
+  .ghvfs/state.sqlite3
   <org>/
     <repo>.issues/<number>/issue.md
     <repo>.pr/<number>/pr.md
@@ -38,4 +38,15 @@ All three kind folders exist after a sync even when empty. Each document carries
 cargo test
 ```
 
-The integration tests use `GHVFS_GH` to point the binary at a stub `gh`, so they need no network or credentials. On Windows the stub-based tests are skipped; verify that target with `cargo check --target x86_64-pc-windows-gnu`.
+The integration tests use `GHVFS_GH` to point the binary at a stub `gh`, so they need no network or credentials. On Windows the stub-based tests are skipped; verify that target with a cross C toolchain:
+
+```sh
+nix-shell -p pkgsCross.musl64.buildPackages.gcc pkgsCross.mingwW64.buildPackages.gcc --run '
+  export CC_x86_64_unknown_linux_musl=x86_64-unknown-linux-musl-gcc
+  export CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc
+  cargo check --tests --target x86_64-unknown-linux-musl
+  cargo check --tests --target x86_64-pc-windows-gnu
+'
+```
+
+SQLite is bundled through `libsqlite3-sys`, so cross-target checks need a C compiler for the target.
