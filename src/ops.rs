@@ -4,7 +4,7 @@ use crate::{
 };
 use serde_json::json;
 use sqlx::SqlitePool;
-use std::{env, path::Path};
+use std::{collections::HashMap, env, path::Path};
 
 pub async fn sync(repo: &str, root: &Path, pool: &SqlitePool) -> Result<(), String> {
     let (org, name) = model::repo_parts(repo)?;
@@ -149,5 +149,87 @@ pub async fn apply(
         db::update_title(pool, &repo, kind, number, &title, &new_body, &remote).await?;
     }
     println!("apply: {changed} changed");
+    Ok(())
+}
+
+pub async fn pull(
+    repo: &str,
+    root: &Path,
+    pool: &SqlitePool,
+    since: &str,
+) -> Result<(String, usize), String> {
+    let raw = gh::gh(&[
+        "api",
+        &format!("repos/{repo}/issues?per_page=100&state=all&since={since}"),
+        "--paginate",
+        "--jq",
+        ".[] | select(.pull_request == null)",
+    ])
+    .await?;
+    let mut records: Vec<_> = gh::json_lines(&raw)?
+        .iter()
+        .map(model::parse_issue)
+        .collect();
+    let raw = gh::gh(&[
+        "api",
+        &format!("repos/{repo}/pulls?per_page=100&state=all&since={since}"),
+        "--paginate",
+        "--jq",
+        ".[]",
+    ])
+    .await?;
+    records.extend(gh::json_lines(&raw)?.iter().map(model::parse_pr));
+
+    let (_, snapshots) = db::load(pool).await?;
+    let known: HashMap<(Kind, u64), &Snapshot> =
+        snapshots.iter().map(|s| ((s.kind, s.number), s)).collect();
+    let mut next = since.to_string();
+    let mut changed = Vec::new();
+    for r in &records {
+        if r.updated_at > next {
+            next = r.updated_at.clone();
+        }
+        let path = model::record_dir(root, repo, r.kind, r.number)?.join(r.kind.doc_name());
+        if let Some(old) = known.get(&(r.kind, r.number)) {
+            if old.updated_at == r.updated_at {
+                continue;
+            }
+            if let Ok(document) = tokio::fs::read_to_string(&path).await {
+                let locally_dirty = doc::parse_doc(&document).is_none_or(|(title, body)| {
+                    title != old.title
+                        || body.trim_end() != old.body.trim_end()
+                        || !doc::matches_readonly(&document, old)
+                });
+                if locally_dirty {
+                    eprintln!("#{} has local edits; skipping remote update", r.number);
+                    continue;
+                }
+            }
+        }
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .map_err(|e| e.to_string())?;
+        tokio::fs::write(&path, doc::front_matter(r))
+            .await
+            .map_err(|e| e.to_string())?;
+        changed.push(r.to_snapshot());
+    }
+    db::upsert(pool, repo, &changed).await?;
+    println!("pull: {} changed", changed.len());
+    Ok((next, changed.len()))
+}
+
+pub async fn unsync(repo: &str, root: &Path, pool: &SqlitePool) -> Result<(), String> {
+    let (org, name) = model::repo_parts(repo)?;
+    db::remove_repo(pool, repo).await?;
+    for kind in [Kind::Issues, Kind::Pr, Kind::Discussion] {
+        let dir = root.join(org).join(format!("{name}.{}", kind.as_str()));
+        if dir.exists() {
+            tokio::fs::remove_dir_all(&dir)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    println!("unsynced {repo}");
     Ok(())
 }

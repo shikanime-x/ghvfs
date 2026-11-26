@@ -24,11 +24,30 @@ async fn run() -> Result<(), String> {
             let pool = db::open(&root).await?;
             ops::apply(&root, &pool, commit, force).await
         }
+        Commands::Pull { repo, root } => {
+            let pool = db::open(&root).await?;
+            ops::pull(&repo, &root, &pool, "1970-01-01T00:00:00Z")
+                .await
+                .map(|_| ())
+        }
+        Commands::Unsync { repo, root } => {
+            let pool = db::open(&root).await?;
+            ops::unsync(&repo, &root, &pool).await
+        }
         Commands::Watch {
             root,
             commit,
             force,
-        } => watch::watch(root, commit, force).await,
+            pull,
+            repo,
+            interval,
+        } => {
+            if pull {
+                watch::watch_pull(&repo, &root, interval).await
+            } else {
+                watch::watch(root, commit, force).await
+            }
+        }
     }
 }
 
