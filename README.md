@@ -15,7 +15,7 @@ cargo run -- apply --root /tmp/ghvfs --commit
 cargo run -- watch --root /tmp/ghvfs --commit
 ```
 
-`sync` is read-only on GitHub. It materializes issues, pull requests and discussions, and writes `.ghvfs/state.sqlite3` through SQLx. Writes are committed in batches of 50 rows. An existing `state.json` is imported once and removed. `apply` is a dry run unless `--commit` is present. `--force` overrides the stale-remote guard on `updated_at`. The CLI uses clap and the runtime is Tokio.
+`sync` is read-only on GitHub. It materializes issues, pull requests and discussions, and writes `.ghvfs/state.sqlite3` through SQLx. Writes are committed in batches of 50 rows. `apply` is a dry run unless `--commit` is present. `--force` overrides the stale-remote guard on `updated_at`. The CLI uses clap and the runtime is Tokio.
 
 ## Layout
 
@@ -28,7 +28,7 @@ cargo run -- watch --root /tmp/ghvfs --commit
     <repo>.discussion/<number>/discussion.md
 ```
 
-All three kind folders exist after a sync even when empty. Each document carries YAML front matter with `number`, `kind`, `title`, `state`, `type`, `labels`, `assignees`, `milestone`, `author`, `created_at`, `updated_at` and `url`, followed by the body. `apply` writes title and body for issues and PRs; discussions are read-only because the edit path is not implemented. Editing other front matter fields is rejected.
+All three kind folders exist after a sync even when empty. Front matter is serialized from a derived serde struct through `serde_yaml`; `Kind` and `Snapshot` are derived types, and `ToSnapshot` converts a record to its stored snapshot. `apply` compares typed front-matter values against the snapshot, so quoting changes alone are not edits. SQL rows are read through a derived `sqlx::FromRow` struct. `apply` writes title and body for issues and PRs; discussions are read-only because the edit path is not implemented.
 
 `watch` observes the tree with `notify` and runs `apply` after document saves, using a 500 ms debounce. It is a dry run unless `--commit` is present. Backends are selected per target: kqueue on macOS, inotify on Linux and Android, ReadDirectoryChangesW on Windows. On macOS outside the devenv shell, set `LIBRARY_PATH="$(xcrun --show-sdk-path)/usr/lib"` for the kqueue backend to link.
 

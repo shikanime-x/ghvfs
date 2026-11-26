@@ -1,12 +1,15 @@
-use crate::{db, doc, gh, model};
-use serde_json::{Value, json};
+use crate::{
+    db, doc, gh,
+    model::{self, Kind, Snapshot, ToSnapshot},
+};
+use serde_json::json;
 use sqlx::SqlitePool;
 use std::{env, path::Path};
 
 pub async fn sync(repo: &str, root: &Path, pool: &SqlitePool) -> Result<(), String> {
     let (org, name) = model::repo_parts(repo)?;
-    for kind in ["issues", "pr", "discussion"] {
-        tokio::fs::create_dir_all(root.join(org).join(format!("{name}.{kind}")))
+    for kind in [Kind::Issues, Kind::Pr, Kind::Discussion] {
+        tokio::fs::create_dir_all(root.join(org).join(format!("{name}.{}", kind.as_str())))
             .await
             .map_err(|e| e.to_string())?;
     }
@@ -53,20 +56,20 @@ pub async fn sync(repo: &str, root: &Path, pool: &SqlitePool) -> Result<(), Stri
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| e.to_string())?;
-        tokio::fs::write(
-            dir.join(model::doc_name(record.kind)),
-            doc::front_matter(record),
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        tokio::fs::write(dir.join(record.kind.doc_name()), doc::front_matter(record))
+            .await
+            .map_err(|e| e.to_string())?;
     }
-    let entries: Vec<Value> = records.iter().map(doc::entry).collect();
+    let entries: Vec<Snapshot> = records.iter().map(ToSnapshot::to_snapshot).collect();
     db::replace(pool, repo, &entries).await?;
     println!(
         "synced {} issues, {} prs, {} discussions",
-        records.iter().filter(|r| r.kind == "issues").count(),
-        records.iter().filter(|r| r.kind == "pr").count(),
-        records.iter().filter(|r| r.kind == "discussion").count()
+        records.iter().filter(|r| r.kind == Kind::Issues).count(),
+        records.iter().filter(|r| r.kind == Kind::Pr).count(),
+        records
+            .iter()
+            .filter(|r| r.kind == Kind::Discussion)
+            .count()
     );
     Ok(())
 }
@@ -77,34 +80,22 @@ pub async fn apply(
     commit: bool,
     force: bool,
 ) -> Result<(), String> {
-    let (repo, mut entries) = db::load(pool).await?;
+    let (repo, entries) = db::load(pool).await?;
     let mut changed = 0;
-    for e in entries.iter_mut() {
-        let number = e.get("number").and_then(Value::as_u64).unwrap_or(0);
-        let kind = e
-            .get("kind")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+    for e in &entries {
+        let number = e.number;
+        let kind = e.kind;
         // GraphQL discussions have no supported edit endpoint here.
-        if kind == "discussion" {
+        if kind == Kind::Discussion {
             continue;
         }
-        let old_title = e
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let old_body = e
-            .get("body")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let doc_path = model::record_dir(root, &repo, &kind, number)?.join(model::doc_name(&kind));
+        let old_title = e.title.as_str();
+        let old_body = e.body.as_str();
+        let doc_path = model::record_dir(root, &repo, kind, number)?.join(kind.doc_name());
         let document = tokio::fs::read_to_string(&doc_path)
             .await
             .map_err(|e| e.to_string())?;
-        if doc::readonly_lines(&document) != doc::expected_readonly(e) {
+        if !doc::matches_readonly(&document, e) {
             return Err(format!(
                 "#{number} changes read-only metadata; only title and body are writable"
             ));
@@ -125,7 +116,7 @@ pub async fn apply(
         .await?
         .trim()
         .to_string();
-        if remote != e.get("updated_at").and_then(Value::as_str).unwrap_or("") && !force {
+        if remote != e.updated_at && !force {
             return Err(format!(
                 "#{number} changed remotely; pass --force to overwrite"
             ));
@@ -155,7 +146,7 @@ pub async fn apply(
         ])
         .await?;
         let new_body = format!("{body}\n");
-        db::update_title(pool, &repo, &kind, number, &title, &new_body, &remote).await?;
+        db::update_title(pool, &repo, kind, number, &title, &new_body, &remote).await?;
     }
     println!("apply: {changed} changed");
     Ok(())

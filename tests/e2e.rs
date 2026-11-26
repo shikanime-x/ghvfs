@@ -94,13 +94,13 @@ fn sync_tree_and_apply_round_trip() {
     assert!(issue.exists() && pr.exists());
     assert!(f.tree.join("acme/demo.discussion").is_dir());
     let doc = fs::read_to_string(&issue).unwrap();
-    assert!(doc.contains("kind: \"issues\"") && doc.contains("Issue body"));
+    assert!(doc.contains("kind: issues") && doc.contains("Issue body"));
 
     let root = f.tree.to_str().unwrap();
     let (ok, out) = run(&f, &["apply", "--root", root]);
     assert!(ok && out.contains("apply: 0 changed"), "{out}");
 
-    let edited = doc.replacen("title: \"Stub issue\"", "title: \"Edited stub issue\"", 1);
+    let edited = doc.replacen("title: Stub issue", "title: Edited stub issue", 1);
     fs::write(&issue, edited).unwrap();
     let (ok, out) = run(&f, &["apply", "--root", root, "--commit"]);
     assert!(ok && out.contains("apply: 1 changed"), "{out}");
@@ -110,10 +110,9 @@ fn sync_tree_and_apply_round_trip() {
     let (ok, out) = run(&f, &["apply", "--root", root]);
     assert!(ok && out.contains("apply: 0 changed"), "{out}");
 
-    let mutated =
-        fs::read_to_string(&issue)
-            .unwrap()
-            .replacen("state: \"open\"", "state: \"closed\"", 1);
+    let mutated = fs::read_to_string(&issue)
+        .unwrap()
+        .replacen("state: open", "state: closed", 1);
     fs::write(&issue, mutated).unwrap();
     let (ok, out) = run(&f, &["apply", "--root", root]);
     assert!(!ok && out.contains("read-only metadata"), "{out}");
@@ -138,7 +137,7 @@ fn watch_applies_a_saved_document() {
     let doc = fs::read_to_string(&issue).unwrap();
     fs::write(
         &issue,
-        doc.replacen("title: \"Stub issue\"", "title: \"Watched edit\"", 1),
+        doc.replacen("title: Stub issue", "title: Watched edit", 1),
     )
     .unwrap();
 
