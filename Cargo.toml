@@ -1,0 +1,8 @@
+[package]
+name = "ghvfs"
+version = "0.1.0"
+edition = "2024"
+description = "Expose GitHub issues as a local tree of markdown files with metadata"
+
+[dependencies]
+serde_json = "1"
