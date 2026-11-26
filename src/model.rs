@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::PathBuf;
+use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,6 +66,10 @@ pub struct Record {
     pub updated_at: String,
     pub url: String,
     pub body: String,
+    /// Development-section links (linked PRs for issues, closing issues for PRs).
+    pub linked: Vec<u64>,
+    /// Projects V2 board data: project title -> {field: value}.
+    pub projects: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 fn field(v: &Value, key: &str) -> String {
@@ -116,6 +120,8 @@ pub fn parse_issue(v: &Value) -> Record {
         updated_at: field(v, "updated_at"),
         url: field(v, "html_url"),
         body: field(v, "body"),
+        linked: Vec::new(),
+        projects: BTreeMap::new(),
     }
 }
 
@@ -138,6 +144,8 @@ pub fn parse_pr(v: &Value) -> Record {
         updated_at: field(v, "updated_at"),
         url: field(v, "html_url"),
         body: field(v, "body"),
+        linked: Vec::new(),
+        projects: BTreeMap::new(),
     }
 }
 
@@ -156,6 +164,8 @@ pub fn parse_discussion(v: &Value) -> Record {
         updated_at: field(v, "updatedAt"),
         url: field(v, "url"),
         body: field(v, "body"),
+        linked: Vec::new(),
+        projects: BTreeMap::new(),
     }
 }
 
@@ -193,6 +203,8 @@ pub fn sample() -> Record {
         updated_at: "2026-11-26T00:00:00Z".into(),
         url: "https://example.test/7".into(),
         body: "Body text".into(),
+        linked: Vec::new(),
+        projects: BTreeMap::new(),
     }
 }
 

@@ -1,12 +1,17 @@
 use crate::{
-    db, doc, gh,
+    db, doc, gh, meta,
     model::{self, Kind, Snapshot, ToSnapshot},
 };
 use serde_json::json;
 use sqlx::SqlitePool;
 use std::{collections::HashMap, env, path::Path};
 
-pub async fn sync(repo: &str, root: &Path, pool: &SqlitePool) -> Result<(), String> {
+pub async fn sync(
+    repo: &str,
+    root: &Path,
+    pool: &SqlitePool,
+    projects: &[String],
+) -> Result<(), String> {
     let (org, name) = model::repo_parts(repo)?;
     for kind in [Kind::Issues, Kind::Pr, Kind::Discussion] {
         tokio::fs::create_dir_all(root.join(org).join(format!("{name}.{}", kind.as_str())))
@@ -50,6 +55,10 @@ pub async fn sync(repo: &str, root: &Path, pool: &SqlitePool) -> Result<(), Stri
     ])
     .await?;
     records.extend(gh::json_lines(&raw)?.iter().map(model::parse_discussion));
+
+    let mut meta = meta::fetch(repo).await?;
+    meta::attach_projects(&mut meta, repo, projects).await?;
+    meta::apply_meta(&mut records, &meta);
 
     for record in &records {
         let dir = model::record_dir(root, repo, record.kind, record.number)?;
@@ -157,6 +166,7 @@ pub async fn pull(
     root: &Path,
     pool: &SqlitePool,
     since: &str,
+    projects: &[String],
 ) -> Result<(String, usize), String> {
     let raw = gh::gh(&[
         "api",
@@ -179,6 +189,10 @@ pub async fn pull(
     ])
     .await?;
     records.extend(gh::json_lines(&raw)?.iter().map(model::parse_pr));
+
+    let mut meta = meta::fetch(repo).await?;
+    meta::attach_projects(&mut meta, repo, projects).await?;
+    meta::apply_meta(&mut records, &meta);
 
     let (_, snapshots) = db::load(pool).await?;
     let known: HashMap<(Kind, u64), &Snapshot> =

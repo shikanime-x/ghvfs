@@ -19,6 +19,13 @@ if "-X" in args and "PATCH" in args:
     print("{}")
     sys.exit(0)
 jq = args[args.index("--jq") + 1] if "--jq" in args else ""
+if jq == ".data":
+    print(json.dumps({"repository": {
+        "issues": {"nodes": [{"number": 1, "linkedBranches": {"nodes": []}}]},
+        "pullRequests": {"nodes": [{"number": 9,
+            "closingIssuesReferences": {"nodes": [{"number": 1}]}}]},
+        "projectsV2": {"nodes": []}}}))
+    sys.exit(0)
 if jq.startswith(".data.repository"):
     sys.exit(0)
 if jq.startswith(".[] | select"):
