@@ -12,6 +12,11 @@ use cli::{Cli, Commands};
 
 async fn run() -> Result<(), String> {
     let cli = Cli::parse();
+    let auth = match cli.gh_user.as_deref() {
+        Some(user) => gh::Auth::Gh(Box::leak(user.to_string().into_boxed_str())),
+        None => gh::Auth::Env,
+    };
+    gh::init(auth)?;
     match cli.command {
         Commands::Sync {
             repo,

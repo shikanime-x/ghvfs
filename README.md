@@ -4,7 +4,7 @@ Expose a GitHub repository's issues as a local tree of markdown files with metad
 
 ## Auth
 
-Set `GH_TOKEN` (or `GITHUB_TOKEN`) to a GitHub token with repo access. The API client is octocrab; no `gh` CLI is required.
+Set `GH_TOKEN` (or `GITHUB_TOKEN`) to a GitHub token with repo access, or pass the global flag `--gh-user <account>` to resolve the token from the `gh` CLI keyring via `gh auth token --user` — the named account wins over the environment, so concurrent use of different identities cannot drift. The API client is octocrab; `gh` is only consulted when `--gh-user` is present.
 
 ## Shell
 
