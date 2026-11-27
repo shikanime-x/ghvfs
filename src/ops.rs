@@ -1,12 +1,17 @@
 use crate::{
-    db, doc, gh,
+    db, doc, gh, meta,
     model::{self, Kind, Snapshot, ToSnapshot},
 };
 use serde_json::json;
 use sqlx::SqlitePool;
-use std::{collections::HashMap, env, path::Path};
+use std::{collections::HashMap, path::Path};
 
-pub async fn sync(repo: &str, root: &Path, pool: &SqlitePool) -> Result<(), String> {
+pub async fn sync(
+    repo: &str,
+    root: &Path,
+    pool: &SqlitePool,
+    projects: &[String],
+) -> Result<(), String> {
     let (org, name) = model::repo_parts(repo)?;
     for kind in [Kind::Issues, Kind::Pr, Kind::Discussion] {
         tokio::fs::create_dir_all(root.join(org).join(format!("{name}.{}", kind.as_str())))
@@ -15,41 +20,29 @@ pub async fn sync(repo: &str, root: &Path, pool: &SqlitePool) -> Result<(), Stri
     }
     let mut records = Vec::new();
 
-    let raw = gh::gh(&[
-        "api",
-        &format!("repos/{repo}/issues?per_page=100"),
-        "--paginate",
-        "--jq",
-        ".[] | select(.pull_request == null)",
-    ])
-    .await?;
-    records.extend(gh::json_lines(&raw)?.iter().map(model::parse_issue));
+    for v in gh::issues_all(repo, "2000-01-01T00:00:00Z").await? {
+        if v.get("pull_request").is_none() {
+            records.push(model::parse_issue(&v));
+        }
+    }
 
-    let raw = gh::gh(&[
-        "api",
-        &format!("repos/{repo}/pulls?per_page=100"),
-        "--paginate",
-        "--jq",
-        ".[]",
-    ])
-    .await?;
-    records.extend(gh::json_lines(&raw)?.iter().map(model::parse_pr));
+    for v in gh::get_all(repo, "pulls?per_page=100").await? {
+        records.push(model::parse_pr(&v));
+    }
 
     let query = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){discussions(first:100){nodes{number title body createdAt updatedAt url author{login}}}}}";
-    let raw = gh::gh(&[
-        "api",
-        "graphql",
-        "-f",
-        &format!("query={query}"),
-        "-f",
-        &format!("owner={org}"),
-        "-f",
-        &format!("name={name}"),
-        "--jq",
-        ".data.repository.discussions.nodes[]?",
-    ])
-    .await?;
-    records.extend(gh::json_lines(&raw)?.iter().map(model::parse_discussion));
+    let data = gh::graphql(query, serde_json::json!({"owner": org, "name": name})).await?;
+    for node in data["repository"]["discussions"]["nodes"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+    {
+        records.push(model::parse_discussion(&node));
+    }
+
+    let mut meta = meta::fetch(repo).await?;
+    meta::attach_projects(&mut meta, repo, projects).await?;
+    meta::apply_meta(&mut records, &meta);
 
     for record in &records {
         let dir = model::record_dir(root, repo, record.kind, record.number)?;
@@ -107,15 +100,12 @@ pub async fn apply(
             continue;
         }
         changed += 1;
-        let remote = gh::gh(&[
-            "api",
-            &format!("repos/{repo}/issues/{number}"),
-            "--jq",
-            ".updated_at",
-        ])
-        .await?
-        .trim()
-        .to_string();
+        let remote = gh::get(&repo, &format!("issues/{number}"))
+            .await?
+            .get("updated_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
         if remote != e.updated_at && !force {
             return Err(format!(
                 "#{number} changed remotely; pass --force to overwrite"
@@ -132,19 +122,7 @@ pub async fn apply(
         if body != old_body.trim_end() {
             patch["body"] = json!(format!("{body}\n"));
         }
-        let path = env::temp_dir().join(format!("ghvfs-{number}.json"));
-        tokio::fs::write(&path, patch.to_string())
-            .await
-            .map_err(|e| e.to_string())?;
-        gh::gh(&[
-            "api",
-            "-X",
-            "PATCH",
-            &format!("repos/{repo}/issues/{number}"),
-            "--input",
-            path.to_str().ok_or("bad temp path")?,
-        ])
-        .await?;
+        gh::patch(&repo, &format!("issues/{number}"), patch).await?;
         let new_body = format!("{body}\n");
         db::update_title(pool, &repo, kind, number, &title, &new_body, &remote).await?;
     }
@@ -157,28 +135,24 @@ pub async fn pull(
     root: &Path,
     pool: &SqlitePool,
     since: &str,
+    projects: &[String],
 ) -> Result<(String, usize), String> {
-    let raw = gh::gh(&[
-        "api",
-        &format!("repos/{repo}/issues?per_page=100&state=all&since={since}"),
-        "--paginate",
-        "--jq",
-        ".[] | select(.pull_request == null)",
-    ])
-    .await?;
-    let mut records: Vec<_> = gh::json_lines(&raw)?
-        .iter()
-        .map(model::parse_issue)
-        .collect();
-    let raw = gh::gh(&[
-        "api",
-        &format!("repos/{repo}/pulls?per_page=100&state=all&since={since}"),
-        "--paginate",
-        "--jq",
-        ".[]",
-    ])
-    .await?;
-    records.extend(gh::json_lines(&raw)?.iter().map(model::parse_pr));
+    let mut records: Vec<_> = Vec::new();
+    for v in gh::issues_all(repo, since).await? {
+        if v.get("pull_request").is_none() {
+            records.push(model::parse_issue(&v));
+        }
+    }
+    for v in gh::get_all(repo, "pulls?per_page=100&state=all").await? {
+        let updated = v.get("updated_at").and_then(|x| x.as_str()).unwrap_or("");
+        if updated >= since {
+            records.push(model::parse_pr(&v));
+        }
+    }
+
+    let mut meta = meta::fetch(repo).await?;
+    meta::attach_projects(&mut meta, repo, projects).await?;
+    meta::apply_meta(&mut records, &meta);
 
     let (_, snapshots) = db::load(pool).await?;
     let known: HashMap<(Kind, u64), &Snapshot> =

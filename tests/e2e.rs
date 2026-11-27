@@ -2,6 +2,7 @@
 
 use std::{
     fs,
+    net::TcpListener,
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::{Command, Stdio},
@@ -9,71 +10,128 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// One JSON HTTP stub: /api/* serves REST fixtures, /api/graphql the GraphQL fixture,
+/// PATCHes are appended to PATCH_LOG. python3 stdlib only; STUB_UPDATED env varies the
+/// remote timestamp so pull tests can produce real diffs.
 const STUB: &str = r###"#!/usr/bin/env python3
 import json, os, sys
-args = sys.argv[1:]
-if "-X" in args and "PATCH" in args:
-    payload = open(args[args.index("--input") + 1]).read()
-    with open(os.environ["GHVFS_PATCH_LOG"], "a") as log:
-        log.write(payload + "\n")
-    print("{}")
-    sys.exit(0)
-jq = args[args.index("--jq") + 1] if "--jq" in args else ""
-if jq.startswith(".data.repository"):
-    sys.exit(0)
-if jq.startswith(".[] | select"):
-    print(json.dumps({"number": 1, "title": "Stub issue", "state": "open",
-        "type": {"name": "Feature"}, "labels": [{"name": "enhancement"}],
-        "assignees": [], "milestone": None, "user": {"login": "shikanime"},
-        "created_at": "2026-11-26T00:00:00Z", "updated_at": "2026-11-26T00:00:00Z",
-        "html_url": "https://example.test/1", "body": "Issue body"}))
-    sys.exit(0)
-if jq == ".[]":
-    print(json.dumps({"number": 9, "title": "Stub PR", "state": "open",
-        "draft": True, "labels": [], "milestone": None,
-        "user": {"login": "shikanime"}, "created_at": "2026-11-26T00:00:00Z",
-        "updated_at": "2026-11-26T00:00:00Z", "html_url": "https://example.test/9",
-        "body": "PR body"}))
-    sys.exit(0)
-if jq == ".resources.core":
-    print(json.dumps({"remaining": 5000, "limit": 5000, "reset": 0}))
-    sys.exit(0)
-if jq == ".updated_at":
-    print("2026-11-26T00:00:00Z")
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+UPDATED = os.environ.get("STUB_UPDATED", "2026-11-26T00:00:00Z")
+ISSUE = {"number": 1, "title": os.environ.get("STUB_TITLE", "Stub issue"), "state": "open",
+    "type": {"name": "Feature"}, "labels": [{"name": "enhancement"}],
+    "assignees": [], "milestone": None, "user": {"login": "shikanime"},
+    "created_at": "2026-11-26T00:00:00Z", "updated_at": UPDATED,
+    "html_url": "https://example.test/1", "body": "Issue body"}
+PR = {"number": 9, "title": "Stub PR", "state": "open",
+    "draft": True, "labels": [], "milestone": None,
+    "user": {"login": "shikanime"}, "created_at": "2026-11-26T00:00:00Z",
+    "updated_at": UPDATED,
+    "html_url": "https://example.test/9", "body": "PR body"}
+GQL = {"repository": {
+    "issues": {"nodes": [{"number": 1, "linkedBranches": {"nodes": []}}]},
+    "pullRequests": {"nodes": [{"number": 9,
+        "closingIssuesReferences": {"nodes": [{"number": 1}]}}]}}}
+RATE = {"resources": {"core": {"remaining": 5000, "limit": 5000, "reset": 0}}}
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+    def _send(self, obj, code=200):
+        body = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def do_GET(self):
+        if self.path.startswith("/api/rate_limit"):
+            self._send(RATE)
+        elif "/issues/" in self.path:
+            self._send(ISSUE)
+        elif "/issues" in self.path:
+            self._send([ISSUE])
+        elif "/pulls" in self.path:
+            self._send([PR])
+        else:
+            self._send({}, 404)
+    def do_PATCH(self):
+        n = int(self.headers.get("Content-Length", 0))
+        with open(os.environ["PATCH_LOG"], "a") as log:
+            log.write(self.rfile.read(n).decode() + "\n")
+        self._send({"updated_at": UPDATED})
+    def do_POST(self):
+        if self.path.endswith("/graphql"):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self._send({"data": GQL})
+        else:
+            self._send({}, 404)
+
+HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 "###;
 
 struct Fixture {
     root: PathBuf,
     tree: PathBuf,
-    stub: PathBuf,
+    api: String,
     patches: PathBuf,
+    child: Option<std::process::Child>,
 }
 
-fn fixture(name: &str) -> Fixture {
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+fn fixture(name: &str, title: &str, updated: &str) -> Fixture {
     let root = std::env::temp_dir().join(format!("ghvfs-e2e-{}-{}", std::process::id(), name));
     let _ = fs::remove_dir_all(&root);
     fs::create_dir_all(&root).unwrap();
-    let stub = root.join("fake-gh");
+    let stub = root.join("stub.py");
     fs::write(&stub, STUB).unwrap();
     fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
     let patches = root.join("patches.log");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let child = Command::new("python3")
+        .arg(&stub)
+        .arg(port.to_string())
+        .env("PATCH_LOG", &patches)
+        .env("STUB_TITLE", title)
+        .env("STUB_UPDATED", updated)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn python stub");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("stub never became ready");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
     Fixture {
         tree: root.join("tree"),
         root,
-        stub,
+        api: format!("http://127.0.0.1:{port}/api"),
         patches,
+        child: Some(child),
     }
 }
 
 fn run(f: &Fixture, args: &[&str]) -> (bool, String) {
-    run_with(f, &f.stub, args)
-}
-
-fn run_with(f: &Fixture, stub: &PathBuf, args: &[&str]) -> (bool, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_ghvfs"))
         .args(args)
-        .env("GHVFS_GH", stub)
-        .env("GHVFS_PATCH_LOG", &f.patches)
+        .env("GH_TOKEN", "stub-token")
+        .env("GHVFS_API", &f.api)
         .current_dir(&f.root)
         .output()
         .unwrap();
@@ -94,7 +152,7 @@ fn sync(f: &Fixture) {
 
 #[test]
 fn sync_tree_and_apply_round_trip() {
-    let f = fixture("round-trip");
+    let f = fixture("round-trip", "Stub issue", "2026-11-26T00:00:00Z");
     sync(&f);
     let issue = f.tree.join("acme/demo.issues/1/issue.md");
     let pr = f.tree.join("acme/demo.pr/9/pr.md");
@@ -127,14 +185,14 @@ fn sync_tree_and_apply_round_trip() {
 
 #[test]
 fn watch_applies_a_saved_document() {
-    let f = fixture("watch");
+    let f = fixture("watch", "Stub issue", "2026-11-26T00:00:00Z");
     sync(&f);
     let issue = f.tree.join("acme/demo.issues/1/issue.md");
     let root = f.tree.to_str().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ghvfs"))
         .args(["watch", "--root", root, "--commit"])
-        .env("GHVFS_GH", &f.stub)
-        .env("GHVFS_PATCH_LOG", &f.patches)
+        .env("GH_TOKEN", "stub-token")
+        .env("GHVFS_API", &f.api)
         .current_dir(&f.root)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -167,31 +225,22 @@ fn watch_applies_a_saved_document() {
 
 #[test]
 fn pull_updates_changed_remote_documents() {
-    let f = fixture("pull");
+    let f = fixture("pull", "Stub issue", "2026-11-26T00:00:00Z");
     sync(&f);
-    let remote = f.root.join("fake-gh-remote");
-    let changed = STUB
-        .replace("Stub issue", "Remote edit")
-        .replace("2026-11-26T00:00:00Z", "2026-11-26T00:01:00Z");
-    fs::write(&remote, changed).unwrap();
-    fs::set_permissions(&remote, fs::Permissions::from_mode(0o755)).unwrap();
-
+    // Second stub with a newer timestamp and a different title.
+    let f2 = fixture("pull-remote", "Remote edit", "2026-11-26T00:01:00Z");
     let root = f.tree.to_str().unwrap();
-    let (ok, out) = run_with(
-        &f,
-        &remote,
-        &["pull", "--repo", "acme/demo", "--root", root],
-    );
+    let (ok, out) = run(&f2, &["pull", "--repo", "acme/demo", "--root", root]);
     assert!(ok && out.contains("pull: 2 changed"), "{out}");
     let issue = fs::read_to_string(f.tree.join("acme/demo.issues/1/issue.md")).unwrap();
     assert!(issue.contains("title: Remote edit"), "{issue}");
-    let (ok, out) = run(&f, &["apply", "--root", root]);
+    let (ok, out) = run(&f2, &["apply", "--root", root]);
     assert!(ok && out.contains("apply: 0 changed"), "{out}");
 }
 
 #[test]
 fn unsync_removes_repo_tree() {
-    let f = fixture("unsync");
+    let f = fixture("unsync", "Stub issue", "2026-11-26T00:00:00Z");
     sync(&f);
     let root = f.tree.to_str().unwrap();
     let (ok, out) = run(&f, &["unsync", "--repo", "acme/demo", "--root", root]);
