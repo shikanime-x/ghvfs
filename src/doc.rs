@@ -1,6 +1,7 @@
 use crate::model::{Kind, Record, Snapshot, ToSnapshot};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Front {
@@ -17,6 +18,15 @@ struct Front {
     created_at: String,
     updated_at: String,
     url: String,
+    /// Development section: linked numbers. ponytail: bare numbers, not URLs — switch to
+    /// objects if titles are ever needed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    linked: Vec<u64>,
+    /// Projects V2 boards: project title -> {field: value}. ponytail: values stay raw
+    /// serde_json (text/number/date/single-select all differ); normalize if cross-project
+    /// diffs matter.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    projects: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 fn front(record: &Record) -> Front {
@@ -33,6 +43,17 @@ fn front(record: &Record) -> Front {
         created_at: record.created_at.clone(),
         updated_at: record.updated_at.clone(),
         url: record.url.clone(),
+        linked: record.linked.clone(),
+        projects: record
+            .projects
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.iter().map(|(fk, fv)| (fk.clone(), fv.clone())).collect(),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -100,5 +121,27 @@ mod tests {
         assert_eq!(parse_doc(&doc).unwrap().0, "Fixed login flow");
         let mutated = doc.replacen("state: open", "state: closed", 1);
         assert!(!matches_readonly(&mutated, &s));
+    }
+
+    #[test]
+    fn projects_and_linked_render() {
+        let mut r = sample();
+        r.linked = vec![9];
+        r.projects.insert(
+            "Skills".into(),
+            [(
+                "Status".to_string(),
+                serde_json::Value::String("Ready".into()),
+            )]
+            .into(),
+        );
+        let doc = front_matter(&r);
+        assert!(doc.contains("linked:\n- 9"), "{doc}");
+        assert!(
+            doc.contains("projects:\n  Skills:\n    Status: Ready"),
+            "{doc}"
+        );
+        // The snapshot render still matches as unmodified front matter.
+        assert!(matches_readonly(&doc, &r.to_snapshot()));
     }
 }

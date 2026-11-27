@@ -8,6 +8,9 @@ use std::path::PathBuf;
     about = "GitHub issues as a local filesystem tree"
 )]
 pub struct Cli {
+    /// Resolve the token from the `gh` keyring for this account instead of GH_TOKEN
+    #[arg(long, global = true)]
+    pub gh_user: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -20,6 +23,9 @@ pub enum Commands {
         repo: String,
         #[arg(long)]
         root: PathBuf,
+        /// Project boards to read fields from, as <owner>/<number>
+        #[arg(long)]
+        project: Vec<String>,
     },
     /// Apply local title and body edits back to GitHub
     Apply {
@@ -36,6 +42,9 @@ pub enum Commands {
         repo: String,
         #[arg(long)]
         root: PathBuf,
+        /// Project boards to read fields from, as <owner>/<number>
+        #[arg(long)]
+        project: Vec<String>,
     },
     /// Remove a synced repository from the tree and the snapshot database
     Unsync {
